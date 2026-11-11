@@ -25,9 +25,13 @@ Compare the number to the failed test's pass window when that window is for this
 
 Continuity or ohms only when the board is unpowered. Do not ask for option bytes, fuses, OTP, or mass erase unless that constraint is explicitly allowed. Do not reflash as a way to skip the electrical order.
 
+## How to choose
+
+Treat the hypotheses from the previous turn as your memory. Update them from the latest reading before you choose. The next probe is the single measurement that separates the two leading active hypotheses. Do not start the investigation over.
+
 ## When to resolve
 
-Resolve on the turn the readings separate the fault. Use a class the UI already has:
+Resolve on the turn the readings separate the fault. The summary names the cause and one recommended fix: a part on the failing net, or a firmware change when the electrical readings are in window. Use a class the UI already has:
 
 - hardware — a rail, clock, reset, or bus reading is outside the window
 - firmware — power, clock, reset, and the bus all read like a live board, and the report is that code is not running

@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { cases, runMockCases } from "./cases.ts";
-import { decide } from "./decide.ts";
+import { decide, remember, usesModel } from "./decide.ts";
 import { loadDecideInput } from "./fixtr.ts";
 import type { DecideInput, Reading, Step } from "./types.ts";
 
@@ -55,11 +55,12 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  const readings = [...(input.readings ?? [])];
+  let state = input;
+  console.log(usesModel() ? "Debug agent (model)." : "No API key set, so this loop is using the playbook.");
   const rl = createInterface({ input: stdin, output: stdout });
   try {
     for (;;) {
-      const step = await decide({ ...input, readings });
+      const step = await decide(state);
       printStep(step);
       if (step.resolved || !step.next_action) return;
       const line = (await rl.question(`${step.next_action.inputLabel ?? "Reading"}${step.next_action.unit ? ` (${step.next_action.unit})` : ""}: `)).trim();
@@ -75,7 +76,7 @@ async function main(argv: string[]): Promise<void> {
         ...(parsed.unit ? { unit: parsed.unit } : {}),
         ...(red ? { target: red.target, net: red.net } : {}),
       };
-      readings.push(reading);
+      state = remember(state, step, reading);
     }
   } finally {
     rl.close();

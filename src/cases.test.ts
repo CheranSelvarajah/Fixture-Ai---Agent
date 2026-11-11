@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import test from "node:test";
 
 import { demoBoard, runCase, runMockCases } from "./cases.ts";
-import { decide, polish } from "./decide.ts";
+import { agentPrompt, decide, polish, remember } from "./decide.ts";
 import { fixtrOrigin, loadDecideInput } from "./fixtr.ts";
 import { createDecideServer } from "./server.ts";
 import type { Step } from "./types.ts";
@@ -163,6 +163,53 @@ test("Fixtr client stays on localhost", () => {
   assert.throws(() => fixtrOrigin(), /localhost/);
   if (previous === undefined) delete process.env.FIXTR_URL;
   else process.env.FIXTR_URL = previous;
+});
+
+test("the agent prompt keeps the last hypotheses and asks for the separating probe", () => {
+  const { system, user } = agentPrompt("playbook text", {
+    symptom: "Firmware is not running",
+    board: demoBoard,
+    hypotheses: [{
+      id: "h-clock",
+      title: "HSE is missing",
+      detail: "Clock not yet measured",
+      confidence: 0.6,
+      status: "active",
+    }],
+    evidence: ["3V3 was in window"],
+    readings: [{ target: "TP1.1", net: "3V3", value: 3.3, unit: "V" }],
+  });
+  assert.match(system, /separates your two leading active hypotheses/);
+  assert.match(system, /playbook text/);
+  assert.match(user, /HSE is missing/);
+  assert.match(user, /TP1\.1/);
+  assert.match(user, /3V3 was in window/);
+});
+
+test("the next turn remembers the hypotheses and the new reading", () => {
+  const input = {
+    symptom: "The 3V3 rail is dead",
+    board: demoBoard,
+    readings: [],
+    hypotheses: [],
+    evidence: [],
+  };
+  const step = {
+    observation: { title: "Measure 3V3", body: "Power first." },
+    hypotheses: [{
+      id: "h-power",
+      title: "3V3 is out of window",
+      detail: "Not measured yet",
+      confidence: 0.7,
+      status: "active" as const,
+    }],
+    evidence_add: ["Asked for 3V3"],
+  };
+  const next = remember(input, step, { target: "TP1.1", net: "3V3", value: 0.04, unit: "V" });
+  assert.equal(next.hypotheses?.[0]?.id, "h-power");
+  assert.deepEqual(next.evidence, ["Asked for 3V3"]);
+  assert.equal(next.readings?.[0]?.value, 0.04);
+  assert.equal(next.readings?.[0]?.net, "3V3");
 });
 
 test("live mode does not invent a step when no key is set", async () => {

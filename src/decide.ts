@@ -14,16 +14,68 @@ const KINDS = new Set<ProbeKind>(["probe", "connector", "button", "pin1"]);
 const CLASSES = new Set(["hardware", "firmware", "plan", "setup", "unknown"]);
 
 /**
- * One turn in, one step out.
- * SB_AI=mock (the default) follows the playbook in-process and does not use an API key.
- * SB_AI=live sends the playbook plus this turn to the model, then the same safety check.
+ * One investigation turn in, one step out.
+ * With ANTHROPIC_API_KEY set, or SB_AI=live, the model updates the hypotheses and chooses the next pad.
+ * SB_AI=mock, or no key, follows the playbook in-process. Either way the reply is checked against the board.
  */
 export async function decide(raw: DecideInput): Promise<Step> {
   const input = normalizeInput(raw);
-  const mode = (process.env.SB_AI ?? "mock").trim().toLowerCase();
-  if (mode === "mock" || mode === "") return polish(scriptedStep(input), input);
+  if (!usesModel()) return polish(scriptedStep(input), input);
   const drafted = await modelStep(input);
   return polish(drafted, input);
+}
+
+/** The model investigates when a key is set, unless mock mode is forced. */
+export function usesModel(): boolean {
+  const mode = (process.env.SB_AI ?? "").trim().toLowerCase();
+  if (mode === "mock") return false;
+  if (mode === "live" || mode === "agent") return true;
+  return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+}
+
+/** Carry this turn's hypotheses, evidence, and reading into the next decide() call. */
+export function remember(input: DecideInput, step: Step, reading?: Reading): DecideInput {
+  const readings = [...(input.readings ?? [])];
+  if (reading) readings.push(reading);
+  return {
+    ...input,
+    readings,
+    hypotheses: step.hypotheses,
+    evidence: [...(input.evidence ?? []), ...step.evidence_add],
+    reading: undefined,
+  };
+}
+
+/** Prompt for one investigation turn. The model sees its own hypotheses from the last turn. */
+export function agentPrompt(playbook: string, input: DecideInput): { system: string; user: string } {
+  const pads = input.board.pads.map((pad) => ({
+    target: targetOf(pad),
+    ref: pad.ref,
+    pad: pad.pad,
+    net: pad.net,
+    ...(pad.x !== undefined ? { x: pad.x } : {}),
+    ...(pad.y !== undefined ? { y: pad.y } : {}),
+  }));
+  const system = [
+    "You are the debug agent for one reported PCB fault. You investigate. You do not write a bring-up plan or firmware.",
+    "Each turn, update the hypotheses you already have, then either request one measurement or resolve the fault.",
+    "The next probe is the one measurement that separates your two leading active hypotheses.",
+    "When the symptom still spans several domains, check power, then clock and reset, then one bus, and only then firmware.",
+    "Use only a target and a net from the allowed pads. A measurement is one red lead on the signal and one black lead on ground.",
+    "On resolve, the summary names the cause and one recommended fix: which part on the failing net to check, or a firmware change when the rails, clock, reset, and bus are in window.",
+    "Return one JSON object and nothing else. Include next_action or resolved, not both.",
+    playbook,
+  ].join("\n\n");
+  const user = JSON.stringify({
+    symptom: input.symptom,
+    constraints: input.constraints ?? { powered: true },
+    failedTest: input.failedTest ?? null,
+    hypotheses: input.hypotheses ?? [],
+    evidence: input.evidence ?? [],
+    readings: input.readings ?? [],
+    allowedPads: pads,
+  });
+  return { system, user };
 }
 
 export function normalizeInput(raw: DecideInput): DecideInput {
@@ -52,8 +104,9 @@ function normalizeReading(raw: Reading): Reading | null {
 
 async function modelStep(input: DecideInput): Promise<Step> {
   const key = process.env.ANTHROPIC_API_KEY?.trim();
-  if (!key) throw new Error("SB_AI=live needs ANTHROPIC_API_KEY. SB_AI=mock runs the playbook with no key.");
+  if (!key) throw new Error("The debug agent needs ANTHROPIC_API_KEY. SB_AI=mock runs the playbook with no key.");
   const playbook = readFileSync(fileURLToPath(PLAYBOOK_URL), "utf8");
+  const { system, user } = agentPrompt(playbook, input);
   const model = process.env.SB_MODEL?.trim() || "claude-sonnet-4-5";
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -64,11 +117,9 @@ async function modelStep(input: DecideInput): Promise<Step> {
     },
     body: JSON.stringify({
       model,
-      max_tokens: 1500,
-      messages: [{
-        role: "user",
-        content: `${playbook}\n\nReturn one JSON object for this turn. No markdown.\n\n${JSON.stringify(input)}`,
-      }],
+      max_tokens: 2000,
+      system,
+      messages: [{ role: "user", content: user }],
     }),
   });
   if (!response.ok) throw new Error(`Model request failed (${response.status}).`);
@@ -88,8 +139,8 @@ function parseStep(text: string): Step {
 export function polish(step: Step, input: DecideInput): Step {
   const cleaned = sanitize(step, input);
   if (!cleaned || blocked(cleaned, input) || !onBoard(cleaned, input)) {
-    const safe = scriptedStep(input);
-    return sanitize(safe, input) ?? {
+    const safe = sanitize(scriptedStep(input), input);
+    if (!safe) return {
       observation: {
         title: "No safe probe",
         body: "The turn had no on-board probe that the constraints allow.",
@@ -97,6 +148,13 @@ export function polish(step: Step, input: DecideInput): Step {
       hypotheses: [],
       evidence_add: [],
       resolved: { class: "unknown", summary: "No safe on-board probe for this turn." },
+    };
+    return {
+      ...safe,
+      observation: {
+        ...safe.observation,
+        reasoning: `The model reply was not a safe on-board probe, so this turn used the playbook. ${safe.observation.reasoning ?? ""}`.trim(),
+      },
     };
   }
   return cleaned;
