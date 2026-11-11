@@ -1,0 +1,10 @@
+{
+  "name": "fixture-ai",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "mock": "node src/loop.ts --mock",
+    "test": "node --test --test-concurrency=1 src/cases.test.ts",
+    "start": "node src/server.ts"
+  }
+}
