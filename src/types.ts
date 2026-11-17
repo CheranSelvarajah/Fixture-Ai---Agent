@@ -82,12 +82,26 @@ export type Constraints = {
   allowMassErase?: boolean;
 };
 
+/** A planned test that failed. min/max/unit repeat the pass window for this net. */
 export type FailedTest = {
+  id?: string;
   name?: string;
+  /** What the test checked: its description, otherwise its purpose. */
+  checked?: string;
+  description?: string;
+  purpose?: string;
+  target?: string;
   net?: string;
   min?: number;
   max?: number;
   unit?: string;
+  measured?: number | string;
+  pass?: {
+    min?: number;
+    max?: number;
+    unit?: string;
+    text?: string;
+  };
 };
 
 export type DecideInput = {
