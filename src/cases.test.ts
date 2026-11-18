@@ -155,6 +155,184 @@ test("fixtr client reads the session symptom and the board pads", async () => {
   }
 });
 
+test("a failed Fixtr result becomes the decide input", async () => {
+  process.env.SB_AI = "mock";
+  const session = {
+    symptom: "unrelated title",
+    issue: "The board will not boot",
+    plan: {
+      tests: [
+        {
+          id: "t-rail",
+          name: "3V3 rail",
+          phase: "power",
+          description: "Measure the logic rail",
+          purpose: "Logic rail stays in regulation",
+          method: "DMM at TP1",
+          pass: { min: 3.2, max: 3.4, unit: "V", text: "3.2 to 3.4 V" },
+          probes: [{ target: "TP1.1", net: "3V3" }],
+          steps: ["Power the board", "Measure TP1"],
+        },
+      ],
+    },
+    run: {
+      results: {
+        "t-rail": { status: "fail", measured: "3.1", notes: "low", at: "2026-11-17T12:00:00.000Z" },
+      },
+    },
+  };
+  await withFixtrSession(session, async () => {
+    const input = await loadDecideInput("sess-fail");
+    assert.equal(input.symptom, "3V3 rail. The board will not boot");
+    assert.deepEqual(input.failedTest, {
+      id: "t-rail",
+      name: "3V3 rail",
+      checked: "Measure the logic rail",
+      description: "Measure the logic rail",
+      purpose: "Logic rail stays in regulation",
+      target: "TP1.1",
+      net: "3V3",
+      min: 3.2,
+      max: 3.4,
+      unit: "V",
+      measured: 3.1,
+      pass: { min: 3.2, max: 3.4, unit: "V", text: "3.2 to 3.4 V" },
+    });
+    assert.deepEqual(input.readings, [{ target: "TP1.1", net: "3V3", value: 3.1, unit: "V" }]);
+    assert.equal(input.board.pads.find((pad) => pad.ref === "TP1")?.net, "3V3");
+    const step = await decide(input);
+    assert.equal(step.resolved?.class, "hardware");
+  });
+});
+
+test("the latest failed result by at is the handoff", async () => {
+  const session = {
+    issue: "Two rails failed",
+    plan: {
+      tests: [
+        {
+          id: "t-old",
+          name: "Earlier rail",
+          description: "First failure",
+          pass: { min: 3.2, max: 3.4, unit: "V" },
+          probes: [{ target: "TP1.1", net: "3V3" }],
+        },
+        {
+          id: "t-new",
+          name: "3V3 rail",
+          description: "Later failure",
+          pass: { min: 3.2, max: 3.4, unit: "V" },
+          probes: [{ target: "TP1.1", net: "3V3" }],
+        },
+      ],
+    },
+    run: {
+      results: {
+        "t-old": { status: "fail", measured: 1.2, at: "2026-11-01T00:00:00.000Z" },
+        "t-none": { status: "fail", measured: 0 },
+        "t-new": { status: "fail", measured: 3.1, at: "2026-11-17T00:00:00.000Z" },
+        "t-pass": { status: "pass", measured: 3.3, at: "2026-11-18T00:00:00.000Z" },
+      },
+    },
+  };
+  await withFixtrSession(session, async () => {
+    const input = await loadDecideInput("sess-latest");
+    assert.equal(input.symptom, "3V3 rail. Two rails failed");
+    assert.equal(input.failedTest?.id, "t-new");
+    assert.equal(input.failedTest?.name, "3V3 rail");
+    assert.equal(input.failedTest?.checked, "Later failure");
+    assert.equal(input.failedTest?.measured, 3.1);
+    assert.equal(input.readings?.[0]?.value, 3.1);
+  });
+});
+
+test("a session with no failed result keeps the reported symptom", async () => {
+  const session = {
+    symptom: "The 3V3 rail is dead",
+    issue: "The board will not boot",
+    plan: {
+      tests: [
+        {
+          id: "t-rail",
+          name: "3V3 rail",
+          description: "Measure the logic rail",
+          pass: { min: 3.2, max: 3.4, unit: "V" },
+          probes: [{ target: "TP1.1", net: "3V3" }],
+        },
+      ],
+    },
+    run: {
+      results: {
+        "t-rail": { status: "pass", measured: 3.3, at: "2026-11-17T12:00:00.000Z" },
+        "t-skip": { status: "skip", measured: "open" },
+      },
+    },
+  };
+  await withFixtrSession(session, async () => {
+    const input = await loadDecideInput("sess-pass");
+    assert.equal(input.symptom, "The 3V3 rail is dead");
+    assert.equal(input.failedTest, undefined);
+    assert.deepEqual(input.readings, []);
+    assert.equal(input.board.pads.find((pad) => pad.ref === "TP1")?.x, 10);
+  });
+});
+
+test("a non-numeric failed measurement is not a reading", async () => {
+  const session = {
+    issue: "Probe did not settle",
+    plan: {
+      tests: [
+        {
+          id: "t-rail",
+          name: "3V3 rail",
+          purpose: "Logic rail stays in regulation",
+          pass: { min: 3.2, max: 3.4, unit: "V", text: "3.2 to 3.4 V" },
+          probes: [{ target: "TP1.1", net: "3V3" }],
+        },
+      ],
+    },
+    run: {
+      results: {
+        "t-rail": { status: "fail", measured: "open", at: "2026-11-17T12:00:00.000Z" },
+      },
+    },
+  };
+  await withFixtrSession(session, async () => {
+    const input = await loadDecideInput("sess-open");
+    assert.equal(input.symptom, "3V3 rail. Probe did not settle");
+    assert.equal(input.failedTest?.id, "t-rail");
+    assert.equal(input.failedTest?.checked, "Logic rail stays in regulation");
+    assert.equal(input.failedTest?.measured, "open");
+    assert.deepEqual(input.failedTest?.pass, { min: 3.2, max: 3.4, unit: "V", text: "3.2 to 3.4 V" });
+    assert.deepEqual(input.readings, []);
+  });
+});
+
+async function withFixtrSession(session: unknown, run: () => Promise<void>): Promise<void> {
+  const fake = createServer((req, res) => {
+    const url = req.url ?? "";
+    const body = url.endsWith("/board")
+      ? demoBoard
+      : url.endsWith("/export.json")
+        ? { board: { pads: [] } }
+        : session;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  });
+  await new Promise<void>((resolve) => fake.listen(0, "127.0.0.1", () => resolve()));
+  const address = fake.address();
+  if (!address || typeof address === "string") throw new Error("no port");
+  const previous = process.env.FIXTR_URL;
+  process.env.FIXTR_URL = `http://127.0.0.1:${address.port}`;
+  try {
+    await run();
+  } finally {
+    if (previous === undefined) delete process.env.FIXTR_URL;
+    else process.env.FIXTR_URL = previous;
+    await new Promise<void>((resolve, reject) => fake.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
 test("Fixtr client stays on localhost", () => {
   const previous = process.env.FIXTR_URL;
   process.env.FIXTR_URL = "http://127.0.0.1:4321";
