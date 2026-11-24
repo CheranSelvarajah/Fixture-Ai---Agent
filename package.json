@@ -5,6 +5,7 @@
   "scripts": {
     "mock": "node src/loop.ts --mock",
     "demo": "node src/demo.ts",
+    "demo:serve": "node src/demo-server.ts",
     "test": "node --test --test-concurrency=1 src/cases.test.ts src/demo.test.ts",
     "start": "node src/server.ts"
   }

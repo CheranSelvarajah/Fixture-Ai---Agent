@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { request } from "node:http";
 import test from "node:test";
 
 import { decide, remember } from "./decide.ts";
-import { presentationBoard, presentationInput, runPresentation } from "./demo.ts";
+import { cannedPresentationStep, presentationBoard, presentationInput, runPresentation } from "./demo.ts";
+import { createDemoServer } from "./demo-server.ts";
 import type { Step } from "./types.ts";
 
 test("presentation demo requires an OpenAI key and does not call the network", async () => {
@@ -134,6 +136,136 @@ test("a bad source rail is the fault, not the divider resistor", async () => {
   assert.match(done.resolved?.summary ?? "", /3V3/);
   assert.doesNotMatch(done.resolved?.summary ?? "", /Replace/);
 });
+
+test("DEMO_CANNED replays 2 V on DIV, 3.3 V on 3V3, then a resistor fault", async () => {
+  const first = cannedPresentationStep({});
+  const div = first.next_action?.probes.find((probe) => probe.lead === "red");
+  assert.equal(div?.target, "TP1.1");
+  assert.equal(div?.net, "DIV");
+  assert.equal(div?.x, 42);
+  assert.equal(div?.y, 18);
+  assert.equal(first.resolved, undefined);
+
+  const second = cannedPresentationStep({ readings: [{ value: 9, unit: "V" }] });
+  const rail = second.next_action?.probes.find((probe) => probe.lead === "red");
+  assert.equal(rail?.target, "TP2.1");
+  assert.equal(rail?.net, "3V3");
+  assert.equal(rail?.x, 14);
+  assert.equal(rail?.y, 12);
+  assert.match(second.observation.body, /2 V/);
+  assert.match(second.observation.body, /DIV/);
+
+  const done = cannedPresentationStep({
+    readings: [
+      { value: 2, unit: "V", net: "DIV", target: "TP1.1" },
+      { value: 3.3, unit: "V", net: "3V3", target: "TP2.1" },
+    ],
+  });
+  assert.equal(done.resolved?.class, "hardware");
+  assert.match(done.resolved?.summary ?? "", /R1 or R2 is faulty/);
+  assert.match(done.resolved?.summary ?? "", /Replace R1 or R2/);
+  assert.match(done.observation.body, /2 V/);
+  assert.match(done.observation.body, /3\.3 V/);
+  assert.equal(done.next_action, undefined);
+});
+
+test("demo server canned mode does not call the model", async () => {
+  const previousFetch = globalThis.fetch;
+  const openai = process.env.OPENAI_API_KEY;
+  const canned = process.env.DEMO_CANNED;
+  process.env.OPENAI_API_KEY = "bad-key";
+  process.env.DEMO_CANNED = "1";
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    throw new Error("canned demo called the network");
+  }) as typeof fetch;
+  const server = createDemoServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("no port");
+  try {
+    const response = await previousFetch(`http://127.0.0.1:${address.port}/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ symptom: "ignored", readings: [] }),
+    });
+    const step = await response.json() as Step;
+    assert.equal(response.status, 200);
+    assert.equal(step.next_action?.probes.find((probe) => probe.lead === "red")?.net, "DIV");
+    assert.equal(fetches, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (openai === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = openai;
+    if (canned === undefined) delete process.env.DEMO_CANNED;
+    else process.env.DEMO_CANNED = canned;
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("demo server plays the presentation story through OpenAI decide()", async () => {
+  const calls: Array<{ url: string; key: string; body: string }> = [];
+  const steps = [probe("Check the divider", "TP1.1", "DIV")];
+  const canned = process.env.DEMO_CANNED;
+  delete process.env.DEMO_CANNED;
+  const server = createDemoServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("no port");
+  await withModel(steps, calls, async () => {
+    const response = await postJson(`http://127.0.0.1:${address.port}/decide`, {
+      symptom: "session issue",
+      readings: [{ value: 2, unit: "V" }],
+      board: { pads: [] },
+    });
+    const step = response.json as Step;
+    assert.equal(response.status, 200);
+    const red = step.next_action?.probes.find((probe) => probe.lead === "red");
+    assert.equal(red?.net, "DIV");
+    assert.equal(red?.x, 42);
+    assert.equal(red?.y, 18);
+  });
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  if (canned === undefined) delete process.env.DEMO_CANNED;
+  else process.env.DEMO_CANNED = canned;
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, "https://api.openai.com/v1/chat/completions");
+  const prompt = userContent(calls[0]?.body ?? "");
+  assert.match(prompt, /TP1\.1/);
+  assert.match(prompt, /"value":2/);
+  assert.match(prompt, /The divider should be 1\.65 V and is not\./);
+  assert.doesNotMatch(prompt, /session issue/);
+});
+
+function postJson(url: string, body: unknown): Promise<{ status: number; json: unknown }> {
+  const payload = JSON.stringify(body);
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          resolve({ status: res.statusCode ?? 0, json: text ? JSON.parse(text) as unknown : {} });
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end(payload);
+  });
+}
 
 function userContent(body: string): string {
   const parsed = JSON.parse(body) as { messages?: Array<{ role?: string; content?: string }> };
