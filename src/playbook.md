@@ -15,6 +15,8 @@ When the symptom needs more than one domain, measure in this order and stop at t
 
 A report of a dead rail stops after that rail. A missing clock still checks power first. Firmware that is not running still checks power, clock, reset, and one bus first.
 
+A divider report names a node that should sit at one schematic voltage. Measure that node first, then the source rail. When the rail is in window and the divider node is not, the cause is a faulty divider resistor. The summary names that resistor and says to replace it.
+
 ## What a probe may touch
 
 Use only a ref, pad, and net that appear on this board. Prefer a test point, then a connector, then a passive, then an IC. On a clock net, prefer the crystal after a test point. A voltage or frequency measurement is one action: red lead on the signal pad, black lead on a ground pad. Include pad x and y when the board has them.

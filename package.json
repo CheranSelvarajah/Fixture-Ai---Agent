@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "mock": "node src/loop.ts --mock",
-    "test": "node --test --test-concurrency=1 src/cases.test.ts",
+    "demo": "node src/demo.ts",
+    "test": "node --test --test-concurrency=1 src/cases.test.ts src/demo.test.ts",
     "start": "node src/server.ts"
   }
 }
