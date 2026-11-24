@@ -12,11 +12,19 @@ const ACTIONS = new Set<ActionType>(["probe", "command", "reflash", "physical", 
 const LEADS = new Set<ProbeLead>(["red", "black"]);
 const KINDS = new Set<ProbeKind>(["probe", "connector", "button", "pin1"]);
 const CLASSES = new Set(["hardware", "firmware", "plan", "setup", "unknown"]);
+const PLAYBOOK_TURN = "this turn used the playbook";
+
+/** True when polish replaced the model reply with the playbook. */
+export function usedPlaybook(step: Step): boolean {
+  return (step.observation?.reasoning ?? "").includes(PLAYBOOK_TURN)
+    || step.resolved?.summary === "No safe on-board probe for this turn.";
+}
 
 /**
  * One investigation turn in, one step out.
- * With ANTHROPIC_API_KEY set, or SB_AI=live, the model updates the hypotheses and chooses the next pad.
- * SB_AI=mock, or no key, follows the playbook in-process. Either way the reply is checked against the board.
+ * OPENAI_API_KEY calls OpenAI. ANTHROPIC_API_KEY calls Claude when no OpenAI key is set.
+ * SB_AI=live or SB_AI=agent also calls the model. SB_AI=mock, or no key, follows the playbook.
+ * Either way the reply is checked against the board.
  */
 export async function decide(raw: DecideInput): Promise<Step> {
   const input = normalizeInput(raw);
@@ -30,7 +38,7 @@ export function usesModel(): boolean {
   const mode = (process.env.SB_AI ?? "").trim().toLowerCase();
   if (mode === "mock") return false;
   if (mode === "live" || mode === "agent") return true;
-  return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+  return Boolean(openaiKey() || anthropicKey());
 }
 
 /** Carry this turn's hypotheses, evidence, and reading into the next decide() call. */
@@ -102,11 +110,49 @@ function normalizeReading(raw: Reading): Reading | null {
   return reading;
 }
 
-async function modelStep(input: DecideInput): Promise<Step> {
+function openaiKey(): string | undefined {
+  const key = process.env.OPENAI_API_KEY?.trim();
+  return key || undefined;
+}
+
+function anthropicKey(): string | undefined {
   const key = process.env.ANTHROPIC_API_KEY?.trim();
-  if (!key) throw new Error("The debug agent needs ANTHROPIC_API_KEY. SB_AI=mock runs the playbook with no key.");
+  return key || undefined;
+}
+
+async function modelStep(input: DecideInput): Promise<Step> {
   const playbook = readFileSync(fileURLToPath(PLAYBOOK_URL), "utf8");
   const { system, user } = agentPrompt(playbook, input);
+  const openai = openaiKey();
+  if (openai) return openAiStep(openai, system, user);
+  const anthropic = anthropicKey();
+  if (anthropic) return anthropicStep(anthropic, system, user);
+  throw new Error("The debug agent needs OPENAI_API_KEY or ANTHROPIC_API_KEY. SB_AI=mock runs the playbook with no key.");
+}
+
+async function openAiStep(key: string, system: string, user: string): Promise<Step> {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      max_tokens: 2000,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
+  });
+  if (!response.ok) throw new Error(`Model request failed (${response.status}).`);
+  const payload = await response.json() as { choices?: Array<{ message?: { content?: string | null } }> };
+  return parseStep(payload.choices?.[0]?.message?.content ?? "");
+}
+
+async function anthropicStep(key: string, system: string, user: string): Promise<Step> {
   const model = process.env.SB_MODEL?.trim() || "claude-sonnet-4-5";
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -153,7 +199,7 @@ export function polish(step: Step, input: DecideInput): Step {
       ...safe,
       observation: {
         ...safe.observation,
-        reasoning: `The model reply was not a safe on-board probe, so this turn used the playbook. ${safe.observation.reasoning ?? ""}`.trim(),
+        reasoning: `The model reply was not a safe on-board probe, so ${PLAYBOOK_TURN}. ${safe.observation.reasoning ?? ""}`.trim(),
       },
     };
   }

@@ -392,17 +392,76 @@ test("the next turn remembers the hypotheses and the new reading", () => {
 
 test("live mode does not invent a step when no key is set", async () => {
   const previous = process.env.SB_AI;
-  const key = process.env.ANTHROPIC_API_KEY;
+  const anthropic = process.env.ANTHROPIC_API_KEY;
+  const openai = process.env.OPENAI_API_KEY;
   process.env.SB_AI = "live";
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
   try {
     await assert.rejects(
       () => decide({ symptom: "The 3V3 rail is dead", board: demoBoard }),
-      /ANTHROPIC_API_KEY/,
+      /OPENAI_API_KEY or ANTHROPIC_API_KEY/,
     );
   } finally {
     process.env.SB_AI = previous ?? "mock";
-    if (key === undefined) delete process.env.ANTHROPIC_API_KEY;
-    else process.env.ANTHROPIC_API_KEY = key;
+    if (anthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = anthropic;
+    if (openai === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = openai;
+  }
+});
+
+test("OPENAI_API_KEY calls chat completions, and Claude remains when only Anthropic is set", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousMode = process.env.SB_AI;
+  const anthropic = process.env.ANTHROPIC_API_KEY;
+  const openai = process.env.OPENAI_API_KEY;
+  delete process.env.SB_AI;
+  const calls: string[] = [];
+  const step = {
+    observation: { title: "Measure 3V3", body: "Power first." },
+    hypotheses: [],
+    evidence_add: [],
+    next_action: {
+      title: "Measure 3V3",
+      body: "Power first.",
+      type: "probe",
+      probes: [
+        { target: "TP1.1", net: "3V3", lead: "red", kind: "probe", label: "TP1.1 · 3V3" },
+        { target: "TP2.1", net: "GND", lead: "black", kind: "probe", label: "TP2.1 · GND" },
+      ],
+      unit: "V",
+    },
+  };
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    calls.push(href);
+    const body = String(init?.body ?? "");
+    assert.equal(body.includes("openai-test") || body.includes("anthropic-test"), false);
+    if (href.includes("openai")) assert.equal(JSON.parse(body).model, "gpt-4o-mini");
+    const payload = href.includes("openai")
+      ? { choices: [{ message: { content: JSON.stringify(step) } }] }
+      : { content: [{ type: "text", text: JSON.stringify(step) }] };
+    return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    process.env.OPENAI_API_KEY = "openai-test";
+    process.env.ANTHROPIC_API_KEY = "anthropic-test";
+    const open = await decide({ symptom: "The 3V3 rail is dead", board: demoBoard });
+    assert.equal(open.next_action?.probes.find((probe) => probe.lead === "red")?.target, "TP1.1");
+    assert.equal(calls.at(-1), "https://api.openai.com/v1/chat/completions");
+
+    delete process.env.OPENAI_API_KEY;
+    const claude = await decide({ symptom: "The 3V3 rail is dead", board: demoBoard });
+    assert.equal(claude.next_action?.probes.find((probe) => probe.lead === "red")?.net, "3V3");
+    assert.equal(calls.at(-1), "https://api.anthropic.com/v1/messages");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousMode === undefined) delete process.env.SB_AI;
+    else process.env.SB_AI = previousMode;
+    if (anthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = anthropic;
+    if (openai === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = openai;
   }
 });

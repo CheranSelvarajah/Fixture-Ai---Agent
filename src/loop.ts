@@ -83,24 +83,28 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-function printStep(step: Step): void {
-  console.log(`\n${step.observation.title}`);
-  console.log(step.observation.body);
-  if (step.observation.reasoning) console.log(step.observation.reasoning);
+export function formatStep(step: Step): string {
+  const lines = [`\n${step.observation.title}`, step.observation.body];
+  if (step.observation.reasoning) lines.push(step.observation.reasoning);
   for (const item of step.hypotheses) {
-    console.log(`  [${item.status}] ${item.title} (${item.confidence})`);
+    lines.push(`  [${item.status}] ${item.title} (${item.confidence})`);
   }
   if (step.resolved) {
-    console.log(`\nresolved ${step.resolved.class}: ${step.resolved.summary}`);
-    return;
+    lines.push(`\nresolved ${step.resolved.class}: ${step.resolved.summary}`);
+    return lines.join("\n");
   }
   const action = step.next_action;
-  if (!action) return;
-  console.log(`\n${action.title}`);
+  if (!action) return lines.join("\n");
+  lines.push(`\n${action.title}`);
   for (const probe of action.probes) {
     const at = probe.x !== undefined && probe.y !== undefined ? ` @ ${probe.x}, ${probe.y} mm` : "";
-    console.log(`  ${probe.lead} ${probe.label}${at}`);
+    lines.push(`  ${probe.lead} ${probe.label}${at}`);
   }
+  return lines.join("\n");
+}
+
+function printStep(step: Step): void {
+  console.log(formatStep(step));
 }
 
 function parseReading(line: string, fallbackUnit: string | undefined): { value: number; unit?: string } | null {

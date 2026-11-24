@@ -1,4 +1,4 @@
-import { kindFor, netClass, nets, pickPad, railNominal, targetOf, type NetClass } from "./board.ts";
+import { kindFor, netClass, nets, padsOn, pickPad, railNominal, targetOf, type NetClass } from "./board.ts";
 import type {
   Board,
   DecideInput,
@@ -11,13 +11,15 @@ import type {
   Step,
 } from "./types.ts";
 
-type StageName = "power" | "clock" | "reset" | "bus";
+type StageName = "divider" | "power" | "clock" | "reset" | "bus";
 
 type Plan = {
   stages: StageName[];
   netFor: Partial<Record<StageName, string>>;
   /** Symptom names a net the board does not have. */
   missingNamed?: string;
+  /** The report is a divider and the board has no resistor node. */
+  dividerMissing?: boolean;
   /** After the electrical stages pass, the report is that code is not running. */
   firmware: boolean;
 };
@@ -42,6 +44,19 @@ export function scriptedStep(input: DecideInput): Step {
   }
 
   const plan = buildPlan(symptom, board);
+  if (plan.dividerMissing) {
+    return resolvedStep(
+      hypotheses(plan, null, "plan"),
+      [],
+      {
+        title: "No divider node on this board",
+        body: "The report is a divider, and the parsed board has no resistor node to measure.",
+        reasoning: "A divider fault is separated on the resistor node and the source rail.",
+      },
+      { class: "plan", summary: "The parsed board has no divider node to probe." },
+    );
+  }
+
   if (plan.missingNamed) {
     return resolvedStep(
       hypotheses(plan, null, "plan"),
@@ -103,7 +118,34 @@ export function scriptedStep(input: DecideInput): Step {
         },
       );
     }
-    if (verdict === "bad") return hardware(plan, stage, net, reading, evidence, "window");
+    if (stage === "divider" && verdict === "good") {
+      return resolvedStep(
+        hypotheses(plan, null, "setup"),
+        evidence,
+        {
+          title: "The reported fault is not on this measurement",
+          body: `${readingLine(reading)} is inside the window for ${net}.`,
+          reasoning: "The symptom named this domain, and the reading does not show that fault.",
+        },
+        {
+          class: "setup",
+          summary: `${net} reads ${formatNum(reading.value)} ${reading.unit ?? ""}. That does not match the report.`.trim(),
+        },
+      );
+    }
+    if (stage === "divider" && verdict === "bad" && plan.netFor.power) continue;
+    if (verdict === "bad") {
+      if (stage === "divider") return resistorFault(board, plan, net, reading, evidence);
+      return hardware(plan, stage, net, reading, evidence, "window");
+    }
+  }
+
+  const dividerNetName = plan.netFor.divider;
+  const dividerReading = bound.get("divider");
+  const railNet = plan.netFor.power;
+  const railReading = railNet ? bound.get("power") : undefined;
+  if (dividerNetName && dividerReading && railNet && railReading && judge(board, dividerNetName, dividerReading, input) === "bad" && judge(board, railNet, railReading, input) === "good") {
+    return resistorFault(board, plan, dividerNetName, dividerReading, evidence, railNet);
   }
 
   if (plan.firmware) {
@@ -151,6 +193,7 @@ function buildPlan(symptom: string, board: Board): Plan {
   const wantsReset = /reset|\bnrst\b/.test(text);
   const wantsBus = /i2c|spi|uart|swd|can|\bbus\b|\bsda\b|\bscl\b|nack|no ack/.test(text);
   const wantsPower = /rail|power|brownout|no voltage|dead|\bvdd\b|\bvcc\b|\d+\s*v\d*|\d+\.\d+/.test(text);
+  const wantsDivider = /divider/.test(text);
 
   const namedPower = namedNet(symptom, board, "power");
   const namedClock = namedNet(symptom, board, "clock");
@@ -160,6 +203,19 @@ function buildPlan(symptom: string, board: Board): Plan {
   const missingNamed = missingName(symptom, board);
   if (missingNamed) {
     return { stages: [], netFor: {}, missingNamed, firmware: false };
+  }
+
+  if (wantsDivider) {
+    const mid = dividerNet(board);
+    if (!mid) return { stages: [], netFor: {}, firmware: false, dividerMissing: true };
+    const source = namedPower ?? logicRail(board);
+    const netFor: Plan["netFor"] = { divider: mid };
+    const stages: StageName[] = ["divider"];
+    if (source && source !== mid) {
+      stages.push("power");
+      netFor.power = source;
+    }
+    return { stages, netFor, firmware: false };
   }
 
   let stages: StageName[];
@@ -191,6 +247,8 @@ function missingName(symptom: string, board: Board): string | undefined {
   const tokens = upper.match(/\b\d+\s*V\d+\b|\b\d+(?:\.\d+)?\s*V\b|\b(?:HSE|LSE|NRST|NRESET|SWDIO|SWCLK)\b/g) ?? [];
   for (const token of tokens) {
     const compact = token.replace(/\s+/g, "");
+    // A decimal such as 1.65 V is a schematic value, not a net name.
+    if (/^\d+\.\d+V$/.test(compact)) continue;
     const nom = voltageToken(compact);
     const have = nets(board).some((net) => {
       const n = net.toUpperCase().replace(/\s+/g, "");
@@ -223,6 +281,15 @@ function preferred(board: Board, cls: NetClass, order: string[]): string | undef
     if (hit) return hit;
   }
   return found[0];
+}
+
+function dividerNet(board: Board): string | undefined {
+  const candidates = nets(board).filter((net) => {
+    const cls = netClass(net);
+    if (cls !== "other") return false;
+    return padsOn(board, net).some((pad) => /^R\d/i.test(pad.ref));
+  });
+  return candidates.find((net) => /DIV|MID|SENSE|VREF/i.test(net)) ?? candidates[0];
 }
 
 function logicRail(board: Board): string | undefined {
@@ -332,31 +399,40 @@ function highLevel(board: Board): number {
 
 function probeStep(input: DecideInput, plan: Plan, stage: StageName, net: string, evidence: string[], latest: Reading | undefined): Step {
   const unpowered = input.constraints?.powered === false && stage === "power";
-  const action = measurement(input.board, stage, net, unpowered);
-  const prior = latest ? `${readingLine(latest)} is in window. ` : "";
+  const action = measurement(input.board, stage, net, unpowered, input);
+  const dividerFollowUp = stage === "power" && Boolean(plan.netFor.divider) && latest?.net === plan.netFor.divider;
+  const prior = !latest
+    ? ""
+    : dividerFollowUp
+      ? `${readingLine(latest)} is outside the schematic window. `
+      : `${readingLine(latest)} is in window. `;
   const why = unpowered
     ? "The board is unpowered, so this check is continuity."
-    : stage === "power"
-      ? "Power is measured before a clock, a reset, or a bus."
-      : stage === "clock"
-        ? "The rail is in window. The clock is next, before reset or a bus."
-        : stage === "reset"
-          ? "Power and the clock are in window. Reset is next, before a bus."
-          : "Power, clock, and reset are in window. One bus is next, before firmware.";
+    : stage === "divider"
+      ? "The reported divider node is measured before the source rail."
+      : dividerFollowUp
+        ? "The divider node is outside its window. The source rail separates a faulty resistor from a bad regulator."
+        : stage === "power"
+          ? "Power is measured before a clock, a reset, or a bus."
+          : stage === "clock"
+            ? "The rail is in window. The clock is next, before reset or a bus."
+            : stage === "reset"
+              ? "Power and the clock are in window. Reset is next, before a bus."
+              : "Power, clock, and reset are in window. One bus is next, before firmware.";
   return {
     observation: {
       title: action.title,
       body: `${prior}${action.body}`.trim(),
       reasoning: why,
     },
-    hypotheses: hypotheses(plan, stage, null),
+    hypotheses: hypotheses(plan, stage, null, dividerFollowUp ? "divider" : null),
     evidence_add: evidence,
     next_action: action,
   };
 }
 
-function measurement(board: Board, stage: StageName, net: string, unpowered: boolean): NextAction {
-  const signal = pickPad(board, net, stage === "power" ? "power" : stage);
+function measurement(board: Board, stage: StageName, net: string, unpowered: boolean, input: DecideInput): NextAction {
+  const signal = pickPad(board, net, stage === "power" || stage === "divider" ? "power" : stage);
   const groundName = groundNet(board);
   const ground = groundName ? pickPad(board, groundName, "ground") : undefined;
   if (!signal || !ground) {
@@ -378,6 +454,20 @@ function measurement(board: Board, stage: StageName, net: string, unpowered: boo
       probes: [red, black],
       inputLabel: `Ohms from ${net} to ${ground.net}`,
       unit: "ohm",
+    };
+  }
+  if (stage === "divider") {
+    const failed = input.failedTest;
+    const span = failed?.net === net && failed.min !== undefined && failed.max !== undefined
+      ? ` Schematic window is ${failed.min} V to ${failed.max} V.`
+      : "";
+    return {
+      title: `Measure ${net}`,
+      body: `Red on ${red.label}, black on ${black.label}.${span}`,
+      type: "probe",
+      probes: [red, black],
+      inputLabel: `Voltage on ${net}`,
+      unit: "V",
     };
   }
   if (stage === "clock") {
@@ -414,6 +504,41 @@ function point(pad: Pad, lead: "red" | "black"): ProbePoint {
   if (pad.x !== undefined) probe.x = pad.x;
   if (pad.y !== undefined) probe.y = pad.y;
   return probe;
+}
+
+function resistorRefs(board: Board, net: string): string[] {
+  const refs = new Set<string>();
+  for (const pad of padsOn(board, net)) {
+    if (/^R\d/i.test(pad.ref)) refs.add(pad.ref);
+  }
+  return [...refs].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+function resistorFault(
+  board: Board,
+  plan: Plan,
+  net: string,
+  reading: Reading,
+  evidence: string[],
+  railNet?: string,
+): Step {
+  const names = resistorRefs(board, net);
+  const part = names.length > 0 ? names.join(" or ") : `the resistor on ${net}`;
+  const summary = railNet
+    ? `${readingLine(reading)} is outside the schematic window for ${net}. ${railNet} is in window, so ${part} is faulty. Replace ${part}.`
+    : `${readingLine(reading)} is outside the schematic window for ${net}, so ${part} is faulty. Replace ${part}.`;
+  return resolvedStep(
+    hypotheses(plan, "divider", "hardware"),
+    evidence,
+    {
+      title: `${part} is faulty`,
+      body: summary,
+      reasoning: railNet
+        ? "The divider node is outside its schematic window and the source rail is in window. The fault is a divider resistor."
+        : "The divider node is outside its schematic window. The fault is a divider resistor.",
+    },
+    { class: "hardware", summary },
+  );
 }
 
 function hardware(
@@ -490,14 +615,22 @@ function resolvedStep(
   return { observation, hypotheses: items, evidence_add: evidence, resolved };
 }
 
-function hypotheses(plan: Plan, checking: StageName | null, outcome: "hardware" | "firmware" | "setup" | "plan" | null): Hypothesis[] {
+function hypotheses(plan: Plan, checking: StageName | null, outcome: "hardware" | "firmware" | "setup" | "plan" | null, keepActive: StageName | null = null): Hypothesis[] {
   const items: Hypothesis[] = [];
   const stages = plan.stages;
   for (const stage of stages) {
     const net = plan.netFor[stage];
     if (!net) continue;
     const id = `h-${stage}`;
-    const title = stage === "power" ? `${net} is out of window` : stage === "clock" ? `${net} is missing` : stage === "reset" ? `${net} is stuck` : `${net} is stuck`;
+    const title = stage === "power"
+      ? `${net} is out of window`
+      : stage === "divider"
+        ? `A resistor on ${net} is faulty`
+        : stage === "clock"
+          ? `${net} is missing`
+          : stage === "reset"
+            ? `${net} is stuck`
+            : `${net} is stuck`;
     let status: Hypothesis["status"] = "active";
     let confidence = checking === stage ? 0.62 : 0.34;
     if (outcome === "hardware" && checking === stage) {
@@ -509,7 +642,7 @@ function hypotheses(plan: Plan, checking: StageName | null, outcome: "hardware" 
     } else if (checking) {
       const checkedIndex = stages.indexOf(checking);
       const index = stages.indexOf(stage);
-      if (index < checkedIndex) {
+      if (index < checkedIndex && stage !== keepActive) {
         status = "ruled_out";
         confidence = 0.05;
       }
