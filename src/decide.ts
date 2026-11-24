@@ -12,6 +12,13 @@ const ACTIONS = new Set<ActionType>(["probe", "command", "reflash", "physical", 
 const LEADS = new Set<ProbeLead>(["red", "black"]);
 const KINDS = new Set<ProbeKind>(["probe", "connector", "button", "pin1"]);
 const CLASSES = new Set(["hardware", "firmware", "plan", "setup", "unknown"]);
+const PLAYBOOK_TURN = "this turn used the playbook";
+
+/** True when polish replaced the model reply with the playbook. */
+export function usedPlaybook(step: Step): boolean {
+  return (step.observation?.reasoning ?? "").includes(PLAYBOOK_TURN)
+    || step.resolved?.summary === "No safe on-board probe for this turn.";
+}
 
 /**
  * One investigation turn in, one step out.
@@ -153,7 +160,7 @@ export function polish(step: Step, input: DecideInput): Step {
       ...safe,
       observation: {
         ...safe.observation,
-        reasoning: `The model reply was not a safe on-board probe, so this turn used the playbook. ${safe.observation.reasoning ?? ""}`.trim(),
+        reasoning: `The model reply was not a safe on-board probe, so ${PLAYBOOK_TURN}. ${safe.observation.reasoning ?? ""}`.trim(),
       },
     };
   }
