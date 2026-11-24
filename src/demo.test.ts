@@ -5,10 +5,12 @@ import { decide, remember } from "./decide.ts";
 import { presentationBoard, presentationInput, runPresentation } from "./demo.ts";
 import type { Step } from "./types.ts";
 
-test("presentation demo requires an API key and does not call the network", async () => {
-  const key = process.env.ANTHROPIC_API_KEY;
+test("presentation demo requires an OpenAI key and does not call the network", async () => {
+  const openai = process.env.OPENAI_API_KEY;
+  const anthropic = process.env.ANTHROPIC_API_KEY;
   const mode = process.env.SB_AI;
-  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "anthropic-test";
   process.env.SB_AI = "live";
   const previousFetch = globalThis.fetch;
   let fetches = 0;
@@ -23,17 +25,19 @@ test("presentation demo requires an API key and does not call the network", asyn
     assert.equal(code, 1);
   } finally {
     globalThis.fetch = previousFetch;
-    if (key === undefined) delete process.env.ANTHROPIC_API_KEY;
-    else process.env.ANTHROPIC_API_KEY = key;
+    if (openai === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = openai;
+    if (anthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = anthropic;
     if (mode === undefined) delete process.env.SB_AI;
     else process.env.SB_AI = mode;
   }
   assert.equal(fetches, 0);
   assert.deepEqual(lines, []);
-  assert.equal(errors[0], "ANTHROPIC_API_KEY is required.");
+  assert.equal(errors[0], "OPENAI_API_KEY is required.");
 });
 
-test("presentation demo asks Claude and prints the canned divider story", async () => {
+test("presentation demo asks OpenAI and prints the canned divider story", async () => {
   const calls: Array<{ url: string; key: string; body: string }> = [];
   const steps = [probe("Check the divider", "TP1.1", "DIV"), probe("Check the source rail", "TP2.1", "3V3"), cause()];
   await withModel(steps, calls, async () => {
@@ -66,8 +70,11 @@ test("presentation demo asks Claude and prints the canned divider story", async 
   });
   assert.equal(calls.length, 3);
   for (const call of calls) {
-    assert.equal(call.url, "https://api.anthropic.com/v1/messages");
-    assert.equal(call.key, "test-key");
+    assert.equal(call.url, "https://api.openai.com/v1/chat/completions");
+    assert.equal(call.key, "Bearer test-key");
+    const payload = JSON.parse(call.body) as { model?: string };
+    assert.equal(payload.model, "gpt-4o-mini");
+    assert.equal(call.body.includes("test-key"), false);
   }
   const prompt = userContent(calls[0]?.body ?? "");
   const pads = presentationBoard.pads.map((pad) => `${pad.ref}.${pad.pad}`);
@@ -129,8 +136,8 @@ test("a bad source rail is the fault, not the divider resistor", async () => {
 });
 
 function userContent(body: string): string {
-  const parsed = JSON.parse(body) as { messages?: Array<{ content?: string }> };
-  return parsed.messages?.[0]?.content ?? "";
+  const parsed = JSON.parse(body) as { messages?: Array<{ role?: string; content?: string }> };
+  return parsed.messages?.find((message) => message.role === "user")?.content ?? "";
 }
 
 function probe(title: string, target: string, net: string): Step {
@@ -185,18 +192,20 @@ async function withModel(
   run: () => Promise<void>,
 ): Promise<void> {
   const previousFetch = globalThis.fetch;
-  const key = process.env.ANTHROPIC_API_KEY;
+  const openai = process.env.OPENAI_API_KEY;
+  const anthropic = process.env.ANTHROPIC_API_KEY;
   const mode = process.env.SB_AI;
-  process.env.ANTHROPIC_API_KEY = "test-key";
+  process.env.OPENAI_API_KEY = "test-key";
+  delete process.env.ANTHROPIC_API_KEY;
   let index = 0;
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
     const headers = new Headers(init?.headers);
-    calls.push({ url: href, key: headers.get("x-api-key") ?? "", body: String(init?.body ?? "") });
+    calls.push({ url: href, key: headers.get("authorization") ?? "", body: String(init?.body ?? "") });
     const step = steps[index];
     index += 1;
     if (!step) throw new Error("presentation demo asked for another model turn");
-    return new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify(step) }] }), {
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(step) } }] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
@@ -205,8 +214,10 @@ async function withModel(
     await run();
   } finally {
     globalThis.fetch = previousFetch;
-    if (key === undefined) delete process.env.ANTHROPIC_API_KEY;
-    else process.env.ANTHROPIC_API_KEY = key;
+    if (openai === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = openai;
+    if (anthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = anthropic;
     if (mode === undefined) delete process.env.SB_AI;
     else process.env.SB_AI = mode;
   }

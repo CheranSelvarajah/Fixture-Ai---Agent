@@ -26,4 +26,4 @@ async function investigationStep(input) {
 }
 ```
 
-`generatePlan` is unchanged. No API key is added to the Fixtr request. Set `ANTHROPIC_API_KEY` on this agent process. With that key set, `POST /decide` investigates: it updates the hypotheses you send and chooses the next pad. `SB_AI=mock` forces the playbook. Send the hypotheses and evidence from the previous step back on the next call, which the snippet above does. The returned object is the one `applyStep` already accepts: `observation`, `hypotheses`, `evidence_add`, and either `next_action` or `resolved`.
+`generatePlan` is unchanged. No API key is added to the Fixtr request. Set `OPENAI_API_KEY` on this agent process to call OpenAI, or `ANTHROPIC_API_KEY` when that is the only key. OpenAI is used when both are set. With a key set, `POST /decide` investigates: it updates the hypotheses you send and chooses the next pad. `SB_AI=mock` forces the playbook. Send the hypotheses and evidence from the previous step back on the next call, which the snippet above does. The returned object is the one `applyStep` already accepts: `observation`, `hypotheses`, `evidence_add`, and either `next_action` or `resolved`.

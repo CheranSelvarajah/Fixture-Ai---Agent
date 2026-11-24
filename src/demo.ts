@@ -44,8 +44,8 @@ export async function runPresentation(
   write: (line: string) => void = console.log,
   writeErr: (line: string) => void = console.error,
 ): Promise<number> {
-  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
-    writeErr("ANTHROPIC_API_KEY is required.");
+  if (!process.env.OPENAI_API_KEY?.trim()) {
+    writeErr("OPENAI_API_KEY is required.");
     return 1;
   }
   const previousMode = process.env.SB_AI;
