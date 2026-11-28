@@ -193,18 +193,17 @@ function stampPresentationReadings(raw: Partial<DecideInput> | null | undefined)
 function dividerProbeStep(): Step {
   return {
     observation: {
-      title: "Check the divider",
-      body: "The divider should be 1.65 V. Measure DIV.",
-      reasoning: "The divider node is measured before the source rail.",
+      title: "Check DIV",
+      body: "Measure DIV; expected 1.65 V.",
     },
     hypotheses: [
-      { id: "H1", title: "Divider resistor", detail: "R1 or R2 is out of value.", confidence: 0.5, status: "active" },
-      { id: "H2", title: "3V3 rail", detail: "The source rail may be out of window.", confidence: 0.5, status: "active" },
+      { id: "H1", title: "Divider resistor", detail: "R1 or R2 wrong.", confidence: 0.5, status: "active" },
+      { id: "H2", title: "3V3 rail", detail: "Source may be off.", confidence: 0.5, status: "active" },
     ],
     evidence_add: [],
     next_action: {
       title: "Measure DIV",
-      body: "Red lead on TP1 pad 1 (DIV). Black lead on TP3 pad 1 (GND).",
+      body: "Red on TP1.1 (DIV). Black on TP3.1 (GND).",
       type: "probe",
       probes: [
         { target: "TP1.1", net: "DIV", lead: "red", kind: "probe", label: "TP1.1 · DIV", x: 42, y: 18 },
@@ -219,18 +218,17 @@ function dividerProbeStep(): Step {
 function railProbeStep(): Step {
   return {
     observation: {
-      title: "Check the source rail",
-      body: "DIV measured 2 V, expected 1.65 V. Measure 3V3 before calling the resistors.",
-      reasoning: "2 V on DIV is outside the window. The 3V3 rail separates a bad regulator from a resistor fault.",
+      title: "Check 3V3",
+      body: "DIV is 2 V (want 1.65 V). Measure 3V3.",
     },
     hypotheses: [
-      { id: "H1", title: "Divider resistor", detail: "DIV is 2 V, outside 1.65 V.", confidence: 0.7, status: "active" },
-      { id: "H2", title: "3V3 rail", detail: "The source rail is still unchecked.", confidence: 0.3, status: "active" },
+      { id: "H1", title: "Divider resistor", detail: "DIV is 2 V.", confidence: 0.7, status: "active" },
+      { id: "H2", title: "3V3 rail", detail: "Still unchecked.", confidence: 0.3, status: "active" },
     ],
     evidence_add: ["DIV measured 2 V"],
     next_action: {
       title: "Measure 3V3",
-      body: "Red lead on TP2 pad 1 (3V3). Black lead on TP3 pad 1 (GND).",
+      body: "Red on TP2.1 (3V3). Black on TP3.1 (GND).",
       type: "probe",
       probes: [
         { target: "TP2.1", net: "3V3", lead: "red", kind: "probe", label: "TP2.1 · 3V3", x: 14, y: 12 },
@@ -246,12 +244,11 @@ function resistorFaultStep(): Step {
   return {
     observation: {
       title: "Divider resistor",
-      body: "DIV measured 2 V, expected 1.65 V. 3V3 measured 3.3 V and is in window. R1 or R2 is faulty. Replace R1 or R2.",
-      reasoning: "The divider node is outside its window and the source rail is in window.",
+      body: "DIV 2 V, 3V3 is 3.3 V. R1 or R2 is faulty. Replace R1 or R2.",
     },
     hypotheses: [
       { id: "H1", title: "Divider resistor", detail: "R1 or R2 is faulty.", confidence: 0.9, status: "confirmed" },
-      { id: "H2", title: "3V3 rail", detail: "3V3 measured 3.3 V.", confidence: 0.1, status: "ruled_out" },
+      { id: "H2", title: "3V3 rail", detail: "3V3 is 3.3 V.", confidence: 0.1, status: "ruled_out" },
     ],
     evidence_add: ["3V3 measured 3.3 V"],
     resolved: { class: "hardware", summary: "R1 or R2 is faulty. Replace R1 or R2." },
